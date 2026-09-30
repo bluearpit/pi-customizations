@@ -1,9 +1,9 @@
 import { uuidv7, type Message, type UserMessage } from "@earendil-works/pi-ai";
 import { convertToLlm, type AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Editor, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Focusable, type TUI } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { Editor, Key, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Focusable, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 
-/** Copy Pi's compaction-aware active branch, excluding system patches (passed separately). */
+/** Take Pi's active, compaction-aware branch; the effective system prompt is passed separately. */
 export function snapshotMessages(messages: AgentMessage[]): Message[] {
 	return convertToLlm(messages.filter((message) => message.role !== "system"));
 }
@@ -15,8 +15,7 @@ type Turn = { speaker: "You" | "Pi" | "Error"; text: string };
 class SideChat implements Focusable {
 	private readonly editor: Editor;
 	private readonly turns: Turn[] = [];
-	private readonly messages: Message[];
-	private readonly systemPrompt: string;
+	private readonly sideMessages: Message[] = [];
 	private readonly requestId = uuidv7();
 	private controller?: AbortController;
 	private closed = false;
@@ -30,13 +29,12 @@ class SideChat implements Focusable {
 	constructor(
 		private readonly tui: TUI,
 		private readonly theme: Theme,
-		private readonly ctx: ExtensionCommandContext,
+		private readonly ctx: ExtensionContext,
 		private readonly pi: ExtensionAPI,
-		private readonly done: (value: void) => void,
+		private readonly onClose: () => void,
+		private readonly onReturnToMain: () => void,
 		prefill: string,
 	) {
-		this.messages = snapshotMessages(ctx.sessionManager.buildSessionProjection().messages);
-		this.systemPrompt = ctx.getSystemPrompt() + sideInstructions;
 		this.editor = new Editor(tui, {
 			borderColor: (text) => theme.fg("accent", text),
 			selectList: {
@@ -51,9 +49,21 @@ class SideChat implements Focusable {
 		this.editor.onSubmit = (value) => { void this.ask(value); };
 	}
 
+	setPrefill(text: string): void {
+		if (!this.pending && text.trim()) this.editor.setText(text);
+		this.tui.requestRender();
+	}
+
 	private async ask(value: string): Promise<void> {
 		const question = value.trim();
-		if (!question || this.pending || this.closed || !this.ctx.model) return;
+		if (!question || this.pending || this.closed) return;
+		if (!this.ctx.isIdle()) {
+			this.turns.push({ speaker: "Error", text: "Wait for the main Pi turn to finish, then ask again." });
+			this.tui.requestRender();
+			return;
+		}
+		const model = this.ctx.model;
+		if (!model) return;
 		this.pending = true;
 		this.editor.disableSubmit = true;
 		this.editor.setText("");
@@ -62,29 +72,29 @@ class SideChat implements Focusable {
 		const userMessage: UserMessage = {
 			role: "user", content: [{ type: "text", text: question }], timestamp: Date.now(),
 		};
-		this.messages.push(userMessage);
 		const controller = new AbortController();
 		this.controller = controller;
 		this.tui.requestRender();
 		try {
-			// No tools supplied: the side chat can answer but cannot mutate the project.
+			// Re-read the parent branch for every question; only these side turns are retained here.
+			const messages = [...snapshotMessages(this.ctx.sessionManager.buildSessionProjection().messages), ...this.sideMessages, userMessage];
+			const systemPrompt = this.ctx.getSystemPrompt() + sideInstructions;
+			// No tools supplied: even while the main chat remains usable, the side cannot mutate files.
 			const answer = await this.ctx.modelRegistry.complete(
-				this.ctx.model,
-				{ systemPrompt: this.systemPrompt, messages: this.messages },
+				model,
+				{ systemPrompt, messages },
 				{ signal: controller.signal, reasoningEffort: this.pi.getThinkingLevel(), sessionId: this.requestId },
 			);
 			if (this.closed) return;
 			if (answer.stopReason === "error" || answer.stopReason === "aborted") {
-				this.messages.pop();
 				this.turns.push({ speaker: "Error", text: answer.errorMessage || answer.stopReason });
 			} else {
-				this.messages.push(answer);
+				this.sideMessages.push(userMessage, answer);
 				const text = answer.content.filter((part): part is { type: "text"; text: string } => part.type === "text").map((part) => part.text).join("\n");
 				this.turns.push({ speaker: "Pi", text: text || "(No text response)" });
 			}
 		} catch (error) {
 			if (this.closed) return;
-			this.messages.pop();
 			this.turns.push({ speaker: "Error", text: error instanceof Error ? error.message : "Request failed" });
 		} finally {
 			if (!this.closed) {
@@ -96,13 +106,13 @@ class SideChat implements Focusable {
 		}
 	}
 
-	private close(): void {
+	close(): void {
 		if (this.closed) return;
 		this.closed = true;
 		this.controller?.abort();
-		this.messages.length = 0;
+		this.sideMessages.length = 0;
 		this.turns.length = 0;
-		this.done();
+		this.onClose();
 	}
 
 	dispose(): void { this.close(); }
@@ -110,6 +120,7 @@ class SideChat implements Focusable {
 
 	handleInput(data: string): void {
 		if (matchesKey(data, "escape")) return this.close();
+		if (matchesKey(data, Key.ctrlAlt("s")) || matchesKey(data, "tab")) return this.onReturnToMain();
 		if (matchesKey(data, "pageUp")) this.scroll += 6;
 		else if (matchesKey(data, "pageDown")) this.scroll = Math.max(0, this.scroll - 6);
 		else if (!this.pending) this.editor.handleInput(data);
@@ -119,15 +130,14 @@ class SideChat implements Focusable {
 	render(width: number): string[] {
 		const inner = Math.max(1, width - 2);
 		const editorLines = this.editor.render(inner);
-		const maxHistory = Math.max(2, Math.min(9, Math.floor(this.tui.terminal.rows * 0.85) - editorLines.length - 7));
+		const maxHistory = Math.max(2, Math.min(9, Math.floor(this.tui.terminal.rows * 0.9) - editorLines.length - 7));
 		const lines: string[] = [];
 		for (const turn of this.turns) {
 			const color = turn.speaker === "You" ? "accent" : turn.speaker === "Error" ? "error" : "text";
-			const safe = stripTerminalSequences(turn.text);
-			lines.push(...wrapTextWithAnsi(this.theme.fg(color, `${turn.speaker}: ${safe}`), inner));
+			lines.push(...wrapTextWithAnsi(this.theme.fg(color, `${turn.speaker}: ${stripTerminalSequences(turn.text)}`), inner));
 			lines.push("");
 		}
-		if (!lines.length) lines.push(this.theme.fg("muted", "Ask about this conversation. Nothing here enters the main session."));
+		if (!lines.length) lines.push(this.theme.fg("muted", "Ask about the main conversation. Side answers are discarded on exit."));
 		this.scroll = Math.min(this.scroll, Math.max(0, lines.length - maxHistory));
 		const end = lines.length - this.scroll;
 		const visible = lines.slice(Math.max(0, end - maxHistory), end);
@@ -138,33 +148,68 @@ class SideChat implements Focusable {
 		const border = (left: string, right: string) => this.theme.fg("border", left + "─".repeat(inner) + right);
 		return [
 			border("╭", "╮"),
-			row(this.theme.fg("accent", " Side chat") + this.theme.fg("dim", " · read-only · discarded on exit")),
-			row(""),
+			row(this.theme.fg("accent", " Side chat") + this.theme.fg("dim", this.focused ? " · Tab → main" : " · main focused · /side → here")),
+			row(this.theme.fg("dim", " Main context refreshed for each question · read-only")),
 			...visible.map(row),
-			row(this.pending ? this.theme.fg("muted", " Thinking… Esc to cancel and leave") : ""),
+			row(this.pending ? this.theme.fg("muted", " Thinking… Esc closes") : ""),
 			...editorLines.map(row),
-			row(this.theme.fg("dim", " Enter ask · Shift+Enter newline · PgUp/PgDn scroll · Esc return")),
+			row(this.theme.fg("dim", " Enter ask · Shift+Enter newline · Tab switch · Esc discard")),
 			border("╰", "╯"),
 		];
 	}
 }
 
 export default function (pi: ExtensionAPI) {
-	pi.registerCommand("side", {
-		description: "Ask read-only, ephemeral questions with the current conversation as context",
-		handler: async (args, ctx) => {
-			if (ctx.mode !== "tui") {
-				ctx.ui.notify("/side requires interactive Pi", "warning");
-				return;
-			}
-			if (!ctx.model) {
-				ctx.ui.notify("Choose a model before opening /side", "warning");
-				return;
-			}
-			await ctx.ui.custom<void>((tui, theme, _kb, done) => new SideChat(tui, theme, ctx, pi, done, args), {
-			overlay: true,
-			overlayOptions: { width: "85%", maxHeight: "85%", margin: 1 },
+	let active: { chat: SideChat; handle: OverlayHandle; ctx: ExtensionContext } | undefined;
+	const widgetKey = "side-chat-host";
+
+	function close(): void {
+		if (!active) return;
+		const current = active;
+		active = undefined;
+		current.ctx.ui.setWidget(widgetKey, undefined); // Disposes widget, panel and overlay.
+	}
+
+	function open(ctx: ExtensionContext, prefill = ""): void {
+		if (ctx.mode !== "tui") {
+			ctx.ui.notify("/side requires interactive Pi", "warning");
+			return;
+		}
+		if (active) {
+			active.chat.setPrefill(prefill);
+			active.handle.focus();
+			return;
+		}
+		if (!ctx.model) {
+			ctx.ui.notify("Choose a model before opening /side", "warning");
+			return;
+		}
+		ctx.ui.setWidget(widgetKey, (tui, theme) => {
+			const chat = new SideChat(tui, theme, ctx, pi, close, () => active?.handle.unfocus(), prefill);
+			const handle = tui.showOverlay(chat, {
+				anchor: "right-center", width: "48%", maxHeight: "90%", margin: 1, nonCapturing: true,
 			});
-		},
+			active = { chat, handle, ctx };
+			handle.focus();
+			return {
+				render: () => [], // Widget owns the overlay but consumes no editor-adjacent space.
+				invalidate: () => chat.invalidate(),
+				dispose: () => {
+					if (active?.chat === chat) active = undefined;
+					handle.hide();
+					chat.dispose();
+				},
+			};
+		});
+	}
+
+	pi.registerCommand("side", {
+		description: "Toggle a read-only side pane that follows the current Pi conversation",
+		handler: async (args, ctx) => open(ctx, args),
 	});
+	pi.registerShortcut(Key.ctrlAlt("s"), {
+		description: "Focus or open the side chat pane",
+		handler: (ctx) => open(ctx),
+	});
+	pi.on("session_shutdown", () => close());
 }

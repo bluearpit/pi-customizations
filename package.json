@@ -1,12 +1,18 @@
 {
   "name": "@bluearpit/pi-customizations",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
   "type": "module",
   "description": "Portable Pi extensions for context usage and ephemeral side chats",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
-    "extensions": ["./extensions/context.ts", "./extensions/side.ts", "./extensions/notify.ts"]
+    "extensions": [
+      "./extensions/context.ts",
+      "./extensions/side.ts",
+      "./extensions/notify.ts"
+    ]
   },
   "scripts": {
     "check": "tsc --noEmit",
