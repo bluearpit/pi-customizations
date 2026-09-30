@@ -1,9 +1,9 @@
 {
   "name": "@bluearpit/pi-customizations",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": false,
   "type": "module",
-  "description": "Portable Pi extensions for context usage and ephemeral side chats",
+  "description": "Portable Pi extensions for context, ephemeral side chats, and tool approvals",
   "keywords": [
     "pi-package"
   ],
@@ -11,7 +11,8 @@
     "extensions": [
       "./extensions/context.ts",
       "./extensions/side.ts",
-      "./extensions/notify.ts"
+      "./extensions/notify.ts",
+      "./extensions/permissions.ts"
     ]
   },
   "scripts": {
@@ -19,18 +20,21 @@
     "test": "node --import tsx --test test/*.test.ts"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.87.1",
     "@earendil-works/pi-agent-core": "0.87.1",
+    "@earendil-works/pi-ai": "0.87.1",
     "@earendil-works/pi-coding-agent": "0.87.1",
     "@earendil-works/pi-tui": "0.87.1",
     "@types/node": "^22.0.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
   }
 }
