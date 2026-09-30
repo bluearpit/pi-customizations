@@ -10,6 +10,10 @@ function harness() {
   let shutdown!: () => void;
   let panel: (Component & Focusable) | undefined;
   let widget: { dispose?: () => void } | undefined;
+  let inputListener: ((data: string) => { consume?: boolean } | undefined) | undefined;
+  let editorText = "";
+  const mainEditor = {} as Component;
+  let focusTarget: Component | null = mainEditor;
   let focused = false;
   let hideCount = 0;
   const requests: { systemPrompt: string; messages: Array<{ role: string; content?: unknown }> }[] = [];
@@ -17,15 +21,16 @@ function harness() {
   const tui = {
     terminal: { rows: 35 },
     requestRender: () => {},
+    getFocusedComponent: () => focusTarget,
     showOverlay: (component: Component & Focusable, options: Record<string, unknown>) => {
       panel = component;
       assert.equal(options.nonCapturing, true);
       assert.equal(options.anchor, "right-center");
       const handle = {
-        focus: () => { focused = true; component.focused = true; },
-        unfocus: () => { focused = false; component.focused = false; },
+        focus: () => { focused = true; component.focused = true; focusTarget = component; },
+        unfocus: () => { focused = false; component.focused = false; focusTarget = mainEditor; },
         isFocused: () => focused,
-        hide: () => { hideCount++; focused = false; component.focused = false; },
+        hide: () => { hideCount++; focused = false; component.focused = false; focusTarget = mainEditor; },
       } as OverlayHandle;
       return handle;
     },
@@ -46,7 +51,13 @@ function harness() {
     ui: { setWidget: (_name: string, factory?: (tui: TUI, theme: Theme) => Component & { dispose?: () => void }) => {
       widget?.dispose?.();
       widget = factory?.(tui, theme);
-    }, notify: () => {} },
+    },
+    onTerminalInput: (handler: typeof inputListener) => {
+      inputListener = handler;
+      return () => { inputListener = undefined; };
+    },
+    getEditorText: () => editorText,
+    notify: () => {} },
   } as unknown as ExtensionCommandContext;
   sideExtension({
     registerCommand: (_name: string, command: { handler: typeof handler }) => { handler = command.handler; },
@@ -65,6 +76,8 @@ function harness() {
     shortcut: () => shortcut(ctx), shutdown: () => shutdown(),
     render: () => panel!.render(70).map(stripTerminalSequences).join("\n"),
     input: (key: string) => panel!.handleInput?.(key),
+    mainTab: () => inputListener?.("\t")?.consume ?? false,
+    setEditorText: (value: string) => { editorText = value; },
     setBusy: (value: boolean) => { busy = value; },
     isFocused: () => focused, getHideCount: () => hideCount,
     hasWidget: () => !!widget,
@@ -81,8 +94,14 @@ test("/side stays open while the main editor is active, refreshes context per qu
   assert.match(side.render(), /Side answer 1/);
   side.input("\t");
   assert.equal(side.isFocused(), false);
+  side.setEditorText("draft");
+  assert.equal(side.mainTab(), false); // Preserve main editor completion when typing.
+  side.setEditorText("");
+  assert.equal(side.mainTab(), true);
+  assert.equal(side.isFocused(), true);
+  side.input("\t");
   side.source.push({ role: "user", content: [{ type: "text", text: "New main turn" }], timestamp: 2 });
-  side.shortcut();
+  side.shortcut(); // Also supports the existing main-editor shortcut.
   assert.equal(side.isFocused(), true);
   await side.ask("Follow-up");
   assert.equal(side.requests.length, 2);
@@ -92,6 +111,7 @@ test("/side stays open while the main editor is active, refreshes context per qu
   side.input("\x1b");
   assert.equal(side.hasWidget(), false);
   assert.equal(side.getHideCount(), 1);
+  assert.equal(side.mainTab(), false); // Listener removed on close.
 });
 
 test("/side does not snapshot a partially streaming main turn and closes on session shutdown", async () => {

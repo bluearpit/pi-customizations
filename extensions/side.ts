@@ -1,7 +1,7 @@
 import { uuidv7, type Message, type UserMessage } from "@earendil-works/pi-ai";
 import { convertToLlm, type AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Editor, Key, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Focusable, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
+import { Editor, Key, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 
 /** Take Pi's active, compaction-aware branch; the effective system prompt is passed separately. */
 export function snapshotMessages(messages: AgentMessage[]): Message[] {
@@ -148,7 +148,7 @@ class SideChat implements Focusable {
 		const border = (left: string, right: string) => this.theme.fg("border", left + "─".repeat(inner) + right);
 		return [
 			border("╭", "╮"),
-			row(this.theme.fg("accent", " Side chat") + this.theme.fg("dim", this.focused ? " · Tab → main" : " · main focused · /side → here")),
+			row(this.theme.fg("accent", " Side chat") + this.theme.fg("dim", this.focused ? " · Tab → main" : " · main focused · Tab → here")),
 			row(this.theme.fg("dim", " Main context refreshed for each question · read-only")),
 			...visible.map(row),
 			row(this.pending ? this.theme.fg("muted", " Thinking… Esc closes") : ""),
@@ -185,9 +185,21 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		ctx.ui.setWidget(widgetKey, (tui, theme) => {
+			const focusableTui = tui as TUI & { getFocusedComponent(): Component | null };
+			const mainEditor = focusableTui.getFocusedComponent();
 			const chat = new SideChat(tui, theme, ctx, pi, close, () => active?.handle.unfocus(), prefill);
 			const handle = tui.showOverlay(chat, {
 				anchor: "right-center", width: "48%", maxHeight: "90%", margin: 1, nonCapturing: true,
+			});
+			// The main editor normally uses Tab for completion. When its prompt is empty,
+			// Tab switches back to the side pane instead; other focused UIs keep their Tab.
+			const stopListening = ctx.ui.onTerminalInput((data) => {
+				if (active?.handle === handle && matchesKey(data, "tab") &&
+					focusableTui.getFocusedComponent() === mainEditor && !ctx.ui.getEditorText().trim()) {
+					handle.focus();
+					return { consume: true };
+				}
+				return undefined;
 			});
 			active = { chat, handle, ctx };
 			handle.focus();
@@ -196,6 +208,7 @@ export default function (pi: ExtensionAPI) {
 				invalidate: () => chat.invalidate(),
 				dispose: () => {
 					if (active?.chat === chat) active = undefined;
+					stopListening();
 					handle.hide();
 					chat.dispose();
 				},
