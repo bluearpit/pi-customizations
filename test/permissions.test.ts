@@ -59,6 +59,21 @@ test("workspace and external writes, symlink escapes, reads, fetch, and policy p
   assert.equal(evaluate({ toolName: "webfetch", input: { url: "https://github.com.evil.example/" } }, policy, cwd, "default").decision, "ask");
 }));
 
+test("bare SDK tool calls load the policy even without session_start", () => fixture(async ({ cwd }) => {
+  process.env.PI_CUSTOMIZATIONS_PERMISSIONS_MODE = "auto";
+  let toolCall!: (event: any, ctx: any) => Promise<any>;
+  permissionsExtension({
+    on: (name: string, handler: typeof toolCall) => {
+      if (name === "tool_call") toolCall = handler;
+      return () => {};
+    },
+    registerCommand: () => {},
+  } as unknown as ExtensionAPI);
+  const ctx = { cwd, mode: "print", hasUI: false };
+  assert.equal(await toolCall({ ...shell("pwd"), type: "tool_call" }, ctx), undefined);
+  assert.equal((await toolCall({ ...shell("git push -f origin main"), type: "tool_call" }, ctx))?.block, true);
+}));
+
 test("extension changes interactive modes and refuses unapproved headless calls", () => fixture(async ({ cwd }) => {
   process.env.PI_CUSTOMIZATIONS_PERMISSIONS_MODE = "auto";
   const handlers = new Map<string, (event: any, ctx: any) => Promise<any>>();

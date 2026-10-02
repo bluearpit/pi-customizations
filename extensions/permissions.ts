@@ -8,9 +8,11 @@ export default function (pi: ExtensionAPI) {
 	let mode = initialMode();
 	let policy: Policy | undefined;
 	let policyError = "Permissions policy not loaded";
+	let policyLoaded = false;
 	let confirmationQueue: Promise<void> = Promise.resolve();
 
 	function reload(): void {
+		policyLoaded = true;
 		try { policy = loadPolicy(); policyError = ""; }
 		catch (error) {
 			policy = undefined;
@@ -42,6 +44,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
+		// Bare SDK sessions may execute tools without ever binding extensions and
+		// emitting session_start. Load the same policy lazily rather than blocking
+		// every call; missing or invalid YAML still fails closed.
+		if (!policyLoaded) reload();
 		if (!policy) return { block: true, reason: `Permission policy unavailable: ${policyError}` };
 		const verdict = evaluate(event, policy, ctx.cwd, mode);
 		if (verdict.decision === "allow") return undefined;

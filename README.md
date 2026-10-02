@@ -11,7 +11,7 @@ pi list
 
 In an existing Pi terminal, run `/reload`. Avoid keeping separate copies of these extensions under `~/.pi/agent/extensions/` or they will load twice. For testing without installing: `pi -e ./extensions/side.ts` or `pi -e ./extensions/context.ts`.
 
-To upgrade an unpinned git installation, run `pi update --extensions` and `/reload`. For repeatable installs on several machines, pin the Git source to a release tag (for example `git:github.com/bluearpit/pi-customizations@v0.3.0`). Install Pi and configure model authentication separately on each machine.
+To upgrade an unpinned git installation, run `pi update --extensions` and `/reload`. For repeatable installs on several machines, pin the Git source to a release tag (for example `git:github.com/bluearpit/pi-customizations@v0.3.1`). Install Pi and configure model authentication separately on each machine.
 
 ## `/context`
 
@@ -26,7 +26,7 @@ The default mode reads Agent Recall's **`~/.agents/permissions.yaml`** at sessio
 - `/permissions ask` — ask before **every** model tool call, including explicit denies; approvals are for one call only.
 - `/permissions` — show the current mode. `/permissions reload` — reload the YAML after you edit it. Switching sessions resets the mode to Default.
 
-When no approval UI exists, a call needing approval is **blocked**, not silently allowed. Missing or invalid policy blocks all model tool calls. A trusted noninteractive host can explicitly set `PI_CUSTOMIZATIONS_PERMISSIONS_MODE=auto` for its own process; the Telegram gateway does this while loading this package. The extension does **not** gate commands you type yourself with `!`, extension-internal actions, or subprocesses launched by an approved tool, and is not a sandbox. Shell denial detects visible command text, not every way a shell program can produce or execute it; use OS isolation for hard restrictions.
+When no approval UI exists, a call needing approval is **blocked**, not silently allowed. Missing or invalid policy blocks all model tool calls. Bare Pi SDK sessions that do not emit `session_start` load the policy on their first tool call; hosts should still call `session.bindExtensions({})` to initialize extension lifecycle events. A trusted noninteractive host can explicitly set `PI_CUSTOMIZATIONS_PERMISSIONS_MODE=auto` for its own process; the Telegram gateway does this while loading this package. The extension does **not** gate commands you type yourself with `!`, extension-internal actions, or subprocesses launched by an approved tool, and is not a sandbox. Shell denial detects visible command text, not every way a shell program can produce or execute it; use OS isolation for hard restrictions.
 
 ## Terminal notifications
 
