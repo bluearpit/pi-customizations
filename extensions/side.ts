@@ -1,6 +1,6 @@
 import { uuidv7, type Message, type UserMessage } from "@earendil-works/pi-ai";
-import { convertToLlm, type AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { convertToLlm, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { Editor, Key, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 
 /** Take Pi's active, compaction-aware branch; the effective system prompt is passed separately. */
