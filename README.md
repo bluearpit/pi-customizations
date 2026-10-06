@@ -63,7 +63,7 @@ The footer shows the running count; `status` shows the latest streamed text/tool
 Restrictions are implemented in the child's tool set and filesystem operations, not just its prompt:
 
 - Review: `bg_read` and `bg_list`; edit additionally enables `bg_edit` and `bg_write`.
-- Reads and writes stay within the selected worktree. Symlinks, hardlinks, special files, Git/Pi metadata, and common credential paths are refused. Edits require an exact unique match; writes use atomic replacement.
+- Reads and writes stay within the selected worktree. Symlinks, hardlinks, special files, Git/Pi metadata, and known credential paths (including `.npmrc` and the entire `.kube` directory) are refused. This name-based filter is not a secret scanner and cannot protect secrets stored under other names. Edits require an exact unique match; writes use atomic replacement.
 - **No shell, subprocess, browser, network/cloud, commit, push, PR, or ticket tools.** The selected model provider is the only supported network service. Workers cannot run tests or query prod, even read-only; they must report those as parent-reviewed follow-ups.
 - Other extensions, skills, prompt templates, project context discovery, and project trust are disabled in the child. The inherited parent system prompt remains context, not authorization.
 - The child receives a filtered environment: model authentication and basic process paths, not AWS profiles/keys, database URLs, GitHub tokens, or Node injection variables.
@@ -81,8 +81,10 @@ Starts are supported in long-lived **interactive and RPC** sessions, not one-sho
 Records, the forked session, event stream, stderr, and result are stored under:
 
 ```text
-~/.pi/agent/background/<parent-session-id>/<job-id>/
+~/.pi/agent/background/<project-sha256>/<parent-session-id>/<job-id>/
 ```
+
+The project key hashes the canonical parent session working directory, independent of the worker's selected worktree. Records also validate that project identity, so identical session IDs in different projects cannot load or interrupt each other's jobs. Legacy unscoped job directories are not automatically imported; inspect their files manually if needed.
 
 A custom `PI_CODING_AGENT_DIR` moves this directory too. Files are private and retained until you delete them. Returning to a session restores its job list; stale running records become `interrupted`, never automatically resumed. Unsupported/malformed records are rejected. Final reports have an integrity hash; altered/missing reports are not treated as valid completed output. Failures preserve partial reports and log paths. If final persistence itself fails, the original record remains recoverable as interrupted and the live parent receives a failure notice.
 

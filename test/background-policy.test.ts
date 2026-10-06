@@ -56,6 +56,30 @@ test("traversal, absolute escapes, metadata/secrets, symlinks and hardlinks are 
 	assert.doesNotMatch(await files.list("."), /file-link|dir-link/);
 });
 
+for (const permission of ["review", "edit"] as const) {
+	test(`${permission} workers block existing npm/Kubernetes credentials, including nested and case-varied paths`, async (t) => {
+		const { root } = await fixture(t);
+		const files = new WorktreeFiles(root, permission);
+		const credentialPaths = [".npmrc", ".kube/config", "nested/.NPMRC", "nested/.KUBE/config"];
+		for (const input of credentialPaths) {
+			await mkdir(path.dirname(path.join(root, input)), { recursive: true });
+			await writeFile(path.join(root, input), "fixture-secret");
+			for (const selected of [input, path.join(root, input)]) {
+				await assert.rejects(files.read(selected), /Protected metadata\/credential path/);
+				if (permission === "edit") {
+					await assert.rejects(files.write(selected, "bad"), /Protected metadata\/credential path/);
+					await assert.rejects(files.edit(selected, "fixture-secret", "bad"), /Protected metadata\/credential path/);
+				}
+			}
+			assert.equal(await readFile(path.join(root, input), "utf8"), "fixture-secret");
+		}
+		for (const directory of [".", "nested"]) assert.doesNotMatch(await files.list(directory), /\.npmrc|\.kube/i);
+		for (const directory of [".kube", "nested/.KUBE"]) await assert.rejects(files.list(directory), /Protected metadata\/credential path/);
+		if (permission === "edit") for (const input of ["new/.npmrc", ".kube/new-config"]) await assert.rejects(files.write(input, "bad"), /Protected metadata\/credential path/);
+		assert.match(await files.read("source.txt"), /one/);
+	});
+}
+
 test("environment strips production and executable injection credentials while retaining model authentication", () => {
 	const env = childEnvironment({ HOME: "/home/pi", PATH: "/usr/bin", ANTHROPIC_API_KEY: "model-key", AWS_PROFILE: "prod", AWS_ACCESS_KEY_ID: "prod-key", DATABASE_URL: "prod", GH_TOKEN: "write", NODE_OPTIONS: "--require injection", NODE_PATH: "/evil", LD_PRELOAD: "evil", PI_SESSION_FILE: "/parent" });
 	assert.deepEqual(env, { HOME: "/home/pi", PATH: "/usr/bin", ANTHROPIC_API_KEY: "model-key" });

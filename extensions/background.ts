@@ -42,7 +42,7 @@ export default function background(pi: ExtensionAPI, options: { root?: string; l
 	pi.on("session_start", (_event, ctx) => {
 		active = true;
 		manager = new BackgroundJobs({
-			root: options.root ?? path.join(getAgentDir(), "background"), parentSessionId: ctx.sessionManager.getSessionId(), launch: options.launch,
+			root: options.root ?? path.join(getAgentDir(), "background"), parentSessionId: ctx.sessionManager.getSessionId(), parentProject: ctx.sessionManager.getCwd(), launch: options.launch,
 			workerExtension: fileURLToPath(new URL("./background/worker.ts", import.meta.url)),
 			onChange: () => refresh(ctx),
 			onFinish: (record) => {

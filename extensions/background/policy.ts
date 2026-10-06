@@ -11,7 +11,7 @@ import type { Permission } from "./protocol.js";
 const exec = promisify(execFile);
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_READ_CHARS = 64 * 1024;
-const protectedName = /^(?:\.git|\.pi|\.aws|\.ssh|\.gnupg|\.env(?:\..*)?|auth\.json|credentials(?:\..*)?|.*\.(?:pem|key|p12|pfx))$/i;
+const protectedName = /^(?:\.git|\.pi|\.aws|\.ssh|\.gnupg|\.npmrc|\.kube|\.env(?:\..*)?|auth\.json|credentials(?:\..*)?|.*\.(?:pem|key|p12|pfx))$/i;
 export const workerToolNames = (permission: Permission) => permission === "edit" ? ["bg_read", "bg_list", "bg_edit", "bg_write"] : ["bg_read", "bg_list"];
 
 export function childEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -132,12 +132,12 @@ export class WorktreeFiles {
 export function restrictedTools(files: WorktreeFiles) {
 	const result = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });
 	const tools = [
-		defineTool({ name: "bg_read", label: "Read worktree file", description: "Read a worktree text file with numbered lines. Cannot access symlinks, secrets, or paths outside the worktree.", parameters: Type.Object({ path: Type.String(), offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })) }), execute: async (_id, args) => result(await files.read(args.path, args.offset, args.limit)) }),
+		defineTool({ name: "bg_read", label: "Read worktree file", description: "Read a worktree text file with numbered lines. Blocks symlinks, known credential filenames, and paths outside the worktree; not a secret scanner.", parameters: Type.Object({ path: Type.String(), offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })) }), execute: async (_id, args) => result(await files.read(args.path, args.offset, args.limit)) }),
 		defineTool({ name: "bg_list", label: "List worktree", description: "List one directory inside the worktree. Use this and bg_read to explore code; there is no shell.", parameters: Type.Object({ path: Type.String() }), execute: async (_id, args) => result(await files.list(args.path)) }),
 	];
 	if (files.permission === "edit") tools.push(
-		defineTool({ name: "bg_edit", label: "Edit worktree file", description: "Replace one unique exact match in a worktree text file. No changes to Git metadata or credential files.", parameters: Type.Object({ path: Type.String(), oldText: Type.String(), newText: Type.String() }), executionMode: "sequential", execute: async (_id, args) => { await files.edit(args.path, args.oldText, args.newText); return result("Edited " + args.path); } }),
-		defineTool({ name: "bg_write", label: "Write worktree file", description: "Create or rewrite a text file inside the worktree. No changes to Git metadata or credential files.", parameters: Type.Object({ path: Type.String(), content: Type.String() }), executionMode: "sequential", execute: async (_id, args) => { await files.write(args.path, args.content); return result("Wrote " + args.path); } }),
+		defineTool({ name: "bg_edit", label: "Edit worktree file", description: "Replace one unique exact match in a worktree text file. Protected metadata and known credential paths are blocked.", parameters: Type.Object({ path: Type.String(), oldText: Type.String(), newText: Type.String() }), executionMode: "sequential", execute: async (_id, args) => { await files.edit(args.path, args.oldText, args.newText); return result("Edited " + args.path); } }),
+		defineTool({ name: "bg_write", label: "Write worktree file", description: "Create or rewrite a text file inside the worktree. Protected metadata and known credential paths are blocked.", parameters: Type.Object({ path: Type.String(), content: Type.String() }), executionMode: "sequential", execute: async (_id, args) => { await files.write(args.path, args.content); return result("Wrote " + args.path); } }),
 	);
 	return tools;
 }

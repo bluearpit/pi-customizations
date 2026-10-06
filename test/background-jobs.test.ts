@@ -3,7 +3,7 @@ import test from "node:test";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { BackgroundJobs } from "../extensions/background/jobs.js";
@@ -18,16 +18,16 @@ class FakeChild extends EventEmitter {
 	complete(code = 0) { this.emit("close", code, null); }
 }
 const input = () => ({ worktree: "/tmp/tree", permission: "review" as const, provider: "fake", model: "fixture", thinking: "off" as const, task: "Review", systemPrompt: "Parent instructions" });
-function report(child: FakeChild, stopReason = "stop") {
-	child.event({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Review finished" }], stopReason, usage: { cost: { total: 0.25 } } } });
+function report(child: FakeChild, stopReason = "stop", text = "Review finished") {
+	child.event({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], stopReason, usage: { cost: { total: 0.25 } } } });
 	child.event({ type: "agent_settled" });
 }
 function fixture(t: { after: (fn: () => Promise<void>) => void }, options: Record<string, unknown> = {}) {
-	const root = mkdtempSync(path.join(os.tmpdir(), "pi-background-jobs-"));
+	const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "pi-background-jobs-")));
 	const children: FakeChild[] = [];
 	const finished: JobRecord[] = [];
 	const calls: { args: string[]; cwd: string }[] = [];
-	const manager = new BackgroundJobs({ root, parentSessionId: "parent", workerExtension: "/trusted/worker.ts", killGraceMs: 5, launch: (args, cwd) => {
+	const manager = new BackgroundJobs({ root, parentSessionId: "parent", parentProject: root, workerExtension: "/trusted/worker.ts", killGraceMs: 5, launch: (args, cwd) => {
 		calls.push({ args, cwd }); const child = new FakeChild(); children.push(child); return child as unknown as ChildProcess;
 	}, onFinish: (record) => finished.push(record), ...options });
 	t.after(async () => { await manager.close(); rmSync(root, { recursive: true, force: true }); });
@@ -35,7 +35,7 @@ function fixture(t: { after: (fn: () => Promise<void>) => void }, options: Recor
 }
 
 test("start returns without waiting; context/settings and explicit restricted flags reach the child", async (t) => {
-	const { manager, children, calls, finished } = fixture(t);
+	const { manager, children, calls, finished, root } = fixture(t);
 	const job = manager.start(input(), [{ role: "user", content: "Important context", timestamp: 1 }], "/parent/session.jsonl");
 	assert.equal(job.status, "running");
 	assert.equal(finished.length, 0);
@@ -53,9 +53,73 @@ test("start returns without waiting; context/settings and explicit restricted fl
 	assert.equal(finished.length, 1);
 	children[0].emit("close", 0, null);
 	assert.equal(finished.length, 1);
-	const restored = new BackgroundJobs({ root: manager.directory.replace(/[/\\]parent$/, ""), parentSessionId: "parent", workerExtension: "/trusted/worker.ts" });
+	const restored = new BackgroundJobs({ root, parentSessionId: "parent", parentProject: manager.parentProject, workerExtension: "/trusted/worker.ts" });
 	assert.equal(restored.get(job.id).status, "completed");
 	assert.match(restored.result(job.id), /Review finished/);
+	await restored.close();
+});
+
+test("identical session IDs in different projects neither expose nor interrupt each other's live jobs", async (t) => {
+	const { manager, children, root } = fixture(t);
+	const first = manager.start(input(), [{ role: "user", content: "Project A private context", timestamp: 1 }]);
+	const initialRecord = readFileSync(manager.paths(first.id).record, "utf8");
+	const projectB = path.join(root, "project-b");
+	mkdirSync(projectB);
+	const secondChild = new FakeChild();
+	const options = { root, parentSessionId: "parent", parentProject: projectB, workerExtension: "/worker" };
+	const second = new BackgroundJobs({ ...options, launch: () => secondChild as unknown as ChildProcess });
+	t.after(() => second.close());
+	assert.notEqual(manager.directory, second.directory);
+	assert.deepEqual(second.list(), []);
+	for (const operation of ["get", "result", "logs", "cancel"] as const) assert.throws(() => second[operation](first.id), /unambiguous/);
+	assert.equal(readFileSync(manager.paths(first.id).record, "utf8"), initialRecord);
+	assert.equal(manager.get(first.id).status, "running");
+	assert.deepEqual(children[0].kills, []);
+
+	const other = second.start({ ...input(), worktree: projectB }, [{ role: "user", content: "Project B context", timestamp: 1 }]);
+	assert.doesNotMatch(readFileSync(second.paths(other.id).session, "utf8"), /Project A private context/);
+	assert.equal(JSON.parse(readFileSync(second.paths(other.id).record, "utf8")).parentProject, projectB);
+	report(children[0], "stop", "Project A private report"); children[0].complete();
+	report(secondChild, "stop", "Project B report"); secondChild.complete();
+	await second.close();
+	const restored = new BackgroundJobs(options);
+	assert.deepEqual(restored.list().map((record) => record.id), [other.id]);
+	assert.match(restored.result(other.id), /Project B report/);
+	assert.doesNotMatch(restored.result(other.id), /Project A/);
+	assert.match(manager.result(first.id), /Project A private report/);
+	assert.throws(() => manager.get(other.id), /unambiguous/);
+	await restored.close();
+});
+
+test("project aliases recover the same namespace; invalid or missing project paths fail fast", async (t) => {
+	const { manager, root, children } = fixture(t);
+	const job = manager.start(input(), []);
+	report(children[0]); children[0].complete();
+	const alias = path.join(root, "project-alias");
+	symlinkSync(root, alias, "dir");
+	const options = { root, parentSessionId: "parent", parentProject: alias, workerExtension: "/worker" };
+	const restored = new BackgroundJobs(options);
+	assert.equal(restored.directory, manager.directory);
+	assert.equal(restored.parentProject, manager.parentProject);
+	assert.equal(restored.get(job.id).status, "completed");
+	await restored.close();
+	for (const parentProject of ["", "relative/project", path.join(root, "missing-project")]) assert.throws(() => new BackgroundJobs({ ...options, parentProject }));
+});
+
+test("legacy unscoped records are never imported or marked interrupted", async (t) => {
+	const { manager, children, root } = fixture(t);
+	const job = manager.start(input(), []);
+	children[0].complete(1);
+	const legacy = path.join(root, "parent", job.id);
+	cpSync(manager.paths(job.id).directory, legacy, { recursive: true });
+	const legacyFile = path.join(legacy, "job.json");
+	const stored = JSON.parse(readFileSync(legacyFile, "utf8"));
+	writeFileSync(legacyFile, JSON.stringify({ ...stored, schemaVersion: 1, parentProject: undefined, status: "running", endedAt: undefined }));
+	const original = readFileSync(legacyFile, "utf8");
+	rmSync(manager.paths(job.id).directory, { recursive: true });
+	const restored = new BackgroundJobs({ root, parentSessionId: "parent", parentProject: manager.parentProject, workerExtension: "/worker" });
+	assert.deepEqual(restored.list(), []);
+	assert.equal(readFileSync(legacyFile, "utf8"), original);
 	await restored.close();
 });
 
@@ -157,12 +221,12 @@ test("stale running records are interrupted, never silently resumed; corrupt rec
 	children[0].complete(1);
 	const stored = JSON.parse(readFileSync(manager.paths(job.id).record, "utf8"));
 	writeFileSync(manager.paths(job.id).record, JSON.stringify({ ...stored, status: "running", endedAt: undefined }));
-	const restored = new BackgroundJobs({ root, parentSessionId: "parent", workerExtension: "/worker" });
+	const restored = new BackgroundJobs({ root, parentSessionId: "parent", parentProject: manager.parentProject, workerExtension: "/worker" });
 	assert.equal(restored.get(job.id).status, "interrupted");
 	assert.match(restored.get(job.id).error!, /not reattached/);
 	await restored.close();
-	for (const change of [{ schemaVersion: 2 }, { parentSessionId: "other" }, { id: "../escape" }]) {
+	for (const change of [{ schemaVersion: 1 }, { schemaVersion: 999 }, { parentSessionId: "other" }, { parentProject: "/other-project" }, { parentProject: undefined }, { id: "../escape" }]) {
 		writeFileSync(manager.paths(job.id).record, JSON.stringify({ ...stored, ...change }));
-		assert.throws(() => new BackgroundJobs({ root, parentSessionId: "parent", workerExtension: "/worker" }));
+		assert.throws(() => new BackgroundJobs({ root, parentSessionId: "parent", parentProject: manager.parentProject, workerExtension: "/worker" }));
 	}
 });

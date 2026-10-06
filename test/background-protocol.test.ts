@@ -3,10 +3,10 @@ import test from "node:test";
 import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { forkSnapshot, JsonLines, snapshotConversation, validateRecord, validateRequest, WorkerEvents, type WorkerRequest } from "../extensions/background/protocol.js";
+import { forkSnapshot, JsonLines, SCHEMA_VERSION, snapshotConversation, validateRecord, validateRequest, WorkerEvents, type WorkerRequest } from "../extensions/background/protocol.js";
 import { parseBackgroundCommand } from "../extensions/background.js";
 
-export const request = (): WorkerRequest => ({ schemaVersion: 1, id: randomUUID(), parentSessionId: "parent", worktree: "/tmp/worktree", permission: "review", provider: "fake", model: "fixture", thinking: "high", task: "Review this code", systemPrompt: "Parent instructions" });
+export const request = (): WorkerRequest => ({ schemaVersion: SCHEMA_VERSION, id: randomUUID(), parentSessionId: "parent", parentProject: "/tmp/parent-project", worktree: "/tmp/worktree", permission: "review", provider: "fake", model: "fixture", thinking: "high", task: "Review this code", systemPrompt: "Parent instructions" });
 const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 } };
 export const assistant = (text = "Review report", stopReason = "stop") => ({ role: "assistant", content: [{ type: "text", text }], provider: "fake", api: "openai-completions", model: "fixture", timestamp: 3, stopReason, usage });
 
@@ -83,10 +83,12 @@ test("success needs a settled final report; partial, error, abort, missing and n
 test("records reject unsupported, malformed and mismatched identities", () => {
 	const input = request();
 	const record = { ...input, status: "completed", startedAt: new Date().toISOString(), endedAt: new Date().toISOString(), progress: "Done", cost: 0, resultSha256: "a".repeat(64) };
-	assert.equal(validateRecord(record, input.id, input.parentSessionId).id, input.id);
-	for (const [key, value] of Object.entries({ schemaVersion: 2, id: randomUUID(), parentSessionId: "other", permission: "unsafe", thinking: "invalid", cost: -1, startedAt: "not a date", status: "unknown", endedAt: undefined, resultSha256: undefined })) {
-		assert.throws(() => validateRecord({ ...record, [key]: value }, input.id, input.parentSessionId), key);
+	assert.equal(validateRecord(record, input.id, input.parentSessionId, input.parentProject).id, input.id);
+	for (const [key, value] of Object.entries({ schemaVersion: 1, id: randomUUID(), parentSessionId: "other", parentProject: "/tmp/other-project", permission: "unsafe", thinking: "invalid", cost: -1, startedAt: "not a date", status: "unknown", endedAt: undefined, resultSha256: undefined })) {
+		assert.throws(() => validateRecord({ ...record, [key]: value }, input.id, input.parentSessionId, input.parentProject), key);
 	}
+	for (const parentProject of [undefined, "", "relative/project"]) assert.throws(() => validateRequest({ ...input, parentProject }), /project/i);
+	assert.throws(() => validateRequest({ ...input, schemaVersion: SCHEMA_VERSION + 1 }), /schema/);
 	assert.throws(() => validateRequest({ ...input, task: "" }), /task/);
 });
 

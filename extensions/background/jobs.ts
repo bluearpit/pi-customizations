@@ -1,10 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { childEnvironment, workerToolNames } from "./policy.js";
-import { forkSnapshot, isRunning, JsonLines, validateRecord, validateRequest, WorkerEvents, type JobRecord, type WorkerRequest } from "./protocol.js";
+import { forkSnapshot, isRunning, JsonLines, SCHEMA_VERSION, validateRecord, validateRequest, WorkerEvents, type JobRecord, type WorkerRequest } from "./protocol.js";
 
 const MAX_ACTIVE = 4;
 const MAX_LOG_BYTES = 20 * 1024 * 1024;
@@ -28,6 +28,7 @@ interface LiveJob {
 export interface ManagerOptions {
 	root: string;
 	parentSessionId: string;
+	parentProject: string;
 	workerExtension: string;
 	launch?: Launch;
 	timeoutMs?: number;
@@ -62,14 +63,18 @@ export class BackgroundJobs {
 	private live = new Map<string, LiveJob>();
 	private closing = false;
 	readonly directory: string;
+	readonly parentProject: string;
 	constructor(private options: ManagerOptions) {
 		if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(options.parentSessionId)) throw new Error("Invalid parent session ID");
-		this.directory = path.join(options.root, options.parentSessionId);
+		if (!path.isAbsolute(options.parentProject)) throw new Error("Parent project must be absolute");
+		this.parentProject = realpathSync(options.parentProject);
+		const projectKey = createHash("sha256").update(this.parentProject).digest("hex");
+		this.directory = path.join(options.root, projectKey, options.parentSessionId);
 		mkdirSync(this.directory, { recursive: true, mode: 0o700 });
 		for (const entry of readdirSync(this.directory, { withFileTypes: true })) {
 			if (!entry.isDirectory() || !/^[a-f0-9-]{36}$/.test(entry.name)) continue;
 			const file = path.join(this.directory, entry.name, "job.json");
-			const record = validateRecord(JSON.parse(readFileSync(file, "utf8")), entry.name, options.parentSessionId);
+			const record = validateRecord(JSON.parse(readFileSync(file, "utf8")), entry.name, options.parentSessionId, this.parentProject);
 			if (isRunning(record)) {
 				record.status = "interrupted";
 				record.error = "Previous manager stopped; workers are not reattached or automatically resumed";
@@ -94,11 +99,11 @@ export class BackgroundJobs {
 		const directory = path.join(this.directory, id);
 		return { directory, record: path.join(directory, "job.json"), events: path.join(directory, "events.jsonl"), stderr: path.join(directory, "stderr.log"), result: path.join(directory, "result.md"), session: path.join(directory, "session.jsonl") };
 	}
-	start(input: Omit<WorkerRequest, "schemaVersion" | "id" | "parentSessionId">, messages: AgentMessage[], parentSession?: string): JobRecord {
+	start(input: Omit<WorkerRequest, "schemaVersion" | "id" | "parentSessionId" | "parentProject">, messages: AgentMessage[], parentSession?: string): JobRecord {
 		if (this.closing) throw new Error("Background manager is shutting down");
 		if (this.live.size >= MAX_ACTIVE) throw new Error(`At most ${MAX_ACTIVE} workers can run at once`);
 		if (input.permission === "edit" && [...this.live.values()].some((job) => job.record.permission === "edit" && job.record.worktree === input.worktree)) throw new Error("An edit worker already owns this worktree");
-		const request = validateRequest({ ...input, schemaVersion: 1, id: randomUUID(), parentSessionId: this.options.parentSessionId });
+		const request = validateRequest({ ...input, schemaVersion: SCHEMA_VERSION, id: randomUUID(), parentSessionId: this.options.parentSessionId, parentProject: this.parentProject });
 		const record: JobRecord = { ...request, status: "running", startedAt: new Date().toISOString(), progress: "Starting", cost: 0 };
 		delete (record as Partial<WorkerRequest>).systemPrompt;
 		const files = this.paths(record.id);

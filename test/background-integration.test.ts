@@ -14,22 +14,26 @@ import type { JobRecord } from "../extensions/background/protocol.js";
 const cli = process.env.PI_BACKGROUND_TEST_CLI ?? fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url));
 const extension = fileURLToPath(new URL("../extensions/background/worker.ts", import.meta.url));
 
-test("real Pi child inherits context/model, exposes only restricted capabilities, executes a safe read and persists its report", { timeout: 30_000 }, async (t) => {
+test("real Pi child inherits context/model, blocks credential reads, executes a safe read and persists its report", { timeout: 30_000 }, async (t) => {
 	const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "pi-background-integration-")));
 	const config = path.join(root, "config"); const worktree = path.join(root, "worktree");
 	mkdirSync(config); mkdirSync(worktree);
 	writeFileSync(path.join(worktree, "evidence.txt"), "Fixture evidence\n");
+	writeFileSync(path.join(worktree, ".npmrc"), "_authToken=fixture-npm-secret");
+	mkdirSync(path.join(worktree, ".kube"));
+	writeFileSync(path.join(worktree, ".kube/config"), "token: fixture-kube-secret");
 	const requests: Record<string, any>[] = [];
 	let releaseOrphan!: () => void; const orphanGate = new Promise<void>((resolve) => { releaseOrphan = resolve; });
 	let orphanStarted!: () => void; const orphanRequest = new Promise<void>((resolve) => { orphanStarted = resolve; });
 	const server = createServer(async (req, res) => {
 		let raw = ""; for await (const chunk of req) raw += chunk;
 		const body = JSON.parse(raw); requests.push(body);
-		if (requests.length > 2) { orphanStarted(); await orphanGate; }
+		if (requests.length > 4) { orphanStarted(); await orphanGate; }
 		res.writeHead(200, { "Content-Type": "text/event-stream" });
 		const chunk = (delta: unknown, finish_reason: string | null = null) => res.write(`data: ${JSON.stringify({ id: "fixture-response", object: "chat.completion.chunk", created: 1, model: "fixture", choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
-		if (requests.length === 1) {
-			chunk({ role: "assistant", tool_calls: [{ index: 0, id: "read1", type: "function", function: { name: "bg_read", arguments: JSON.stringify({ path: "evidence.txt" }) } }] });
+		if (requests.length <= 3) {
+			const selected = [".npmrc", ".kube/config", "evidence.txt"][requests.length - 1];
+			chunk({ role: "assistant", tool_calls: [{ index: 0, id: `read${requests.length}`, type: "function", function: { name: "bg_read", arguments: JSON.stringify({ path: selected }) } }] });
 			chunk({}, "tool_calls");
 		} else {
 			chunk({ role: "assistant", content: "Review report: fixture evidence verified. No changes, commands, cloud access, commits, or pushes." });
@@ -42,7 +46,7 @@ test("real Pi child inherits context/model, exposes only restricted capabilities
 	writeFileSync(path.join(config, "models.json"), JSON.stringify({ providers: { "background-fixture": { baseUrl: `http://127.0.0.1:${address.port}/v1`, api: "openai-completions", apiKey: "local-fixture-only", models: [{ id: "fixture", name: "Fixture", reasoning: false, input: ["text"], contextWindow: 32768, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } }));
 	let finish!: (record: JobRecord) => void;
 	const completed = new Promise<JobRecord>((resolve) => { finish = resolve; });
-	const manager = new BackgroundJobs({ root: path.join(root, "jobs"), parentSessionId: "parent", workerExtension: extension, onFinish: finish,
+	const manager = new BackgroundJobs({ root: path.join(root, "jobs"), parentSessionId: "parent", parentProject: worktree, workerExtension: extension, onFinish: finish,
 		launch: (args, cwd) => spawn(process.execPath, [cli, "--offline", ...args], { cwd, env: { ...childEnvironment(process.env), PI_CODING_AGENT_DIR: config }, stdio: ["ignore", "pipe", "pipe", "pipe"] }),
 	});
 	let orphanManager: BackgroundJobs | undefined;
@@ -51,20 +55,22 @@ test("real Pi child inherits context/model, exposes only restricted capabilities
 	assert.equal(job.status, "running");
 	const record = await completed;
 	assert.equal(record.status, "completed", manager.logs(job.id));
-	assert.equal(requests.length, 2);
+	assert.equal(requests.length, 4);
 	assert.equal(requests[0].model, "fixture");
 	assert.match(JSON.stringify(requests[0].messages), /Inherited parent context/);
 	assert.match(JSON.stringify(requests[0].messages), /Archived design decision/);
 	assert.match(JSON.stringify(requests[0].messages), /BACKGROUND WORKER CONTRACT/);
 	assert.deepEqual(requests[0].tools.map((tool: any) => tool.function.name).sort(), ["bg_list", "bg_read"]);
-	assert.match(JSON.stringify(requests[1].messages), /Fixture evidence/);
+	for (const index of [1, 2]) assert.match(JSON.stringify(requests[index].messages), /Protected metadata\/credential path/);
+	assert.match(JSON.stringify(requests[3].messages), /Fixture evidence/);
+	assert.doesNotMatch(JSON.stringify(requests), /fixture-npm-secret|fixture-kube-secret/);
 	assert.match(manager.result(job.id), /fixture evidence verified/);
 	assert.equal(readFileSync(path.join(worktree, "evidence.txt"), "utf8"), "Fixture evidence\n");
 
 	let orphanChild!: ChildProcess;
 	let orphanDone!: (record: JobRecord) => void;
 	const orphanCompletion = new Promise<JobRecord>((resolve) => { orphanDone = resolve; });
-	orphanManager = new BackgroundJobs({ root: path.join(root, "jobs"), parentSessionId: "orphan-parent", workerExtension: extension, onFinish: orphanDone,
+	orphanManager = new BackgroundJobs({ root: path.join(root, "jobs"), parentSessionId: "orphan-parent", parentProject: worktree, workerExtension: extension, onFinish: orphanDone,
 		launch: (args, cwd) => {
 			orphanChild = spawn(process.execPath, [cli, "--offline", ...args], { cwd, env: { ...childEnvironment(process.env), PI_CODING_AGENT_DIR: config }, stdio: ["ignore", "pipe", "pipe", "pipe"] });
 			return orphanChild;

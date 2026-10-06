@@ -3,14 +3,15 @@ import { convertToLlm, SessionManager } from "@earendil-works/pi-coding-agent";
 import { StringDecoder } from "node:string_decoder";
 import path from "node:path";
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 export const MAX_RESULT_BYTES = 256 * 1024;
 export type Permission = "review" | "edit";
 export type JobStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled" | "interrupted";
 export interface WorkerRequest {
-	schemaVersion: 1;
+	schemaVersion: typeof SCHEMA_VERSION;
 	id: string;
 	parentSessionId: string;
+	parentProject: string;
 	worktree: string;
 	permission: Permission;
 	provider: string;
@@ -37,20 +38,21 @@ function object(value: unknown): Record<string, unknown> {
 export function validateRequest(value: unknown): WorkerRequest {
 	const data = object(value);
 	if (data.schemaVersion !== SCHEMA_VERSION) throw new Error("Unsupported background schema version");
-	for (const key of ["id", "parentSessionId", "worktree", "provider", "model", "task", "systemPrompt"]) {
+	for (const key of ["id", "parentSessionId", "parentProject", "worktree", "provider", "model", "task", "systemPrompt"]) {
 		if (typeof data[key] !== "string" || !(data[key] as string).trim()) throw new Error(`Invalid ${key}`);
 	}
 	if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(data.id as string)) throw new Error("Invalid job ID");
+	if (!path.isAbsolute(data.parentProject as string)) throw new Error("Parent project must be absolute");
 	if (!path.isAbsolute(data.worktree as string)) throw new Error("Worktree must be absolute");
 	if ((data.task as string).length > 16_384) throw new Error("Task exceeds 16 KiB");
 	if (data.permission !== "review" && data.permission !== "edit") throw new Error("Invalid permission");
 	if (!["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(String(data.thinking))) throw new Error("Invalid thinking level");
 	return data as unknown as WorkerRequest;
 }
-export function validateRecord(value: unknown, id: string, parentSessionId: string): JobRecord {
+export function validateRecord(value: unknown, id: string, parentSessionId: string, parentProject: string): JobRecord {
 	const data = object(value);
 	validateRequest({ ...data, systemPrompt: "stored separately" });
-	if (data.id !== id || data.parentSessionId !== parentSessionId) throw new Error("Background record belongs to another job/session");
+	if (data.id !== id || data.parentSessionId !== parentSessionId || data.parentProject !== parentProject) throw new Error("Background record belongs to another job/session/project");
 	if (!["running", "cancelling", "completed", "failed", "cancelled", "interrupted"].includes(String(data.status))) throw new Error("Invalid job status");
 	if (typeof data.startedAt !== "string" || !Number.isFinite(Date.parse(data.startedAt))) throw new Error("Invalid start time");
 	if (typeof data.progress !== "string" || typeof data.cost !== "number" || !Number.isFinite(data.cost) || data.cost < 0) throw new Error("Invalid job progress/usage");
