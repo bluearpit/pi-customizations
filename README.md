@@ -1,6 +1,6 @@
 # Pi customizations
 
-Portable [Pi](https://github.com/earendil-works/pi) extensions for context usage, ephemeral side chats, tool approvals, terminal notifications, and restricted background workers. Typechecked against `@earendil-works/pi-coding-agent` 0.87.1; background subprocess integration tested on 0.87.1 and 1.0.4. No Pi fork required.
+Portable [Pi](https://github.com/earendil-works/pi) extensions for context usage, ephemeral side chats, tool approvals, terminal notifications, restricted background workers, and local Brave automation. Typechecked against `@earendil-works/pi-coding-agent` 0.87.1; background subprocess integration tested on 0.87.1 and 1.0.4. No Pi fork required.
 
 ## Install
 
@@ -90,12 +90,40 @@ A custom `PI_CODING_AGENT_DIR` moves this directory too. Files are private and r
 
 To test without installing: `pi -e ./extensions/background.ts`. Do not run `pi update` over an edited managed package checkout before saving your changes elsewhere.
 
+## `brave_browser` — terminal and Telegram browser access
+
+The packaged `brave-browser` skill teaches the same model-callable tool in terminal Pi and headless SDK/Telegram sessions. No Pi fork, second Telegram poller, or separate browser daemon is needed. Node.js 22.19+ is required. The pinned Puppeteer client uses an isolated process for each operation; it never launches or closes your personal browser.
+
+Brave must already be running with **classic CDP debugging bound to loopback**. On macOS, after quitting Brave yourself, start it with:
+
+```bash
+open -a "Brave Browser" --args --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1
+```
+
+Save important tabs and unsaved work first; use Brave's “Continue where you left off” startup setting if needed. These arguments only apply when Brave is not already running. A normal Dock launch does not enable debugging. The inspect-page permission server is a different connection flow and may not expose the classic `/json/version` endpoint. The extension does not bypass its approval, enable debugging, or restart Brave for you.
+
+**Security:** CDP grants broad access to the default profile, including its authenticated sites. Any local process able to connect to this port may control the browser. Never expose the port to the network. The extension only operates on its own recorded tabs and does not export cookies or saved credentials; this is application behavior, not a security sandbox. The backend discovers target metadata internally. Text and screenshots are sent to the model and stored according to Pi's normal transcript behavior. Tool arguments are recorded, so do not put secrets in `fill`.
+
+Ask Pi (or send a plain-text Telegram prompt) to open a URL using `brave_browser`. Actions: `status`, `open`, `read`, `click`, `fill`, `press`, `screenshot`, `close`. `page` is a short logical name scoped to the Pi session. `read` returns rendered text and visible elements with CSS selectors; follow `nextOffset` to page through long text. Screenshots are viewport PNGs provided to the model; Telegram's reply transport is unchanged.
+
+- Terminal Default/Ask permissions may request approval. Telegram's explicit Auto mode allows this tool; missing/invalid permission YAML still blocks tool calls.
+- State is stored with private permissions under the agent directory's `browser-state/`, keyed by session ID. Terminal/Telegram handoff of the same session reuses tabs; different sessions cannot select each other's tabs through this tool. Do not concurrently write the same Pi transcript from two hosts.
+- The tool declares sequential execution to preserve action order within a model batch; cross-process session and browser-endpoint locks serialize operations, including across different terminal/Telegram sessions, to avoid competing CDP clients. Helpers have deadlines and are killed on cancellation. Read-only client failures retry once; navigation, clicks, typing, and submissions are **never automatically replayed**. If one fails, inspect before deciding whether to repeat it.
+- Tab creation is reserved durably before it starts, so an explicit retry can recover a tab created just before a helper/host crash. `close` can also discard an unfinished reservation without creating another tab. A tab closed by the user or lost after a browser restart is recreated only by an explicit `open` with a URL. Previous forms/actions are not restored.
+- Dead-host locks become reclaimable after about a minute. Corrupt state fails closed rather than resetting ownership. Tabs remain open across Pi/gateway restarts; use `close` when done (20 named tabs per session).
+- Popups from an owned page observed during an action are closed and reported as `blockedPopups`; use explicit `open` for links that need a new tab. Delayed popups after the helper disconnects are not monitored, and an interrupted action can leave a popup requiring manual cleanup.
+- `PI_BROWSER_CDP_URL` overrides the default `http://127.0.0.1:9222`; only loopback HTTP endpoints without credentials/path are accepted. Set it in each host process if using a nondefault port. Hosts with different agent/state directories should set `PI_BROWSER_LOCK_DIR` to the same private directory to coordinate access to the same browser. The Mac must be awake and Brave running.
+
+After installation, run `/reload` in existing terminals and restart your Telegram gateway through its maintenance CLI. The gateway loses its in-memory session selection on restart; select an existing session again with `/sessions`.
+
 ## Development
 
 ```bash
 npm ci
 npm run check
 npm test
+# Opt-in smoke tests against already-running Brave; only create/close test-owned tabs:
+PI_BROWSER_LIVE=1 npm test
 ```
 
 The suite includes filesystem-policy tests, failure/recovery/cancellation cases, UI lifecycle tests, and localhost-only model fixtures that launch real Pi child/RPC processes. It does not call paid model APIs or production services. To test another installed Pi build:
