@@ -16,7 +16,7 @@ test("live controls: whole rich-text drafts, native/ARIA state, uploads, and nes
   let uploaded = "";
   const html = () => `<!doctype html><title>Control fixture</title><h1>Control fixture</h1>
 <p id="events">Enter 0; checkbox 0</p><p id="editor-result"></p><p id="area-result"></p><p id="select-result"></p><p id="file-result"></p><p id="controlled-result"></p><p id="parent-result">Parent unchanged</p>
-<div id="short-selectors"><section data-testid="stable-group"><div role="textbox" contenteditable="true">Scoped draft</div></section><section data-testid="other-group"><div role="textbox" contenteditable="true">Other draft</div></section><button data-testid='short "quoted" control'>Quoted selector fixture</button></div>
+<div id="short-selectors"><section id="stable-scope" data-testid="stable-group"><div role="group"><div data-testid="shared-editor" role="textbox" contenteditable="true">Scoped draft</div></div></section><section id="other-scope" data-testid="other-group"><div><div role="textbox" contenteditable="true">Other draft</div></div></section><button id="duplicate-group" onclick="document.querySelector('[data-testid=other-group] > div').setAttribute('role','group');document.querySelector('[data-testid=other-group] > div > div').setAttribute('data-testid','shared-editor')">Duplicate widget scope fixture</button><button data-testid='short "quoted" control'>Quoted selector fixture</button></div>
 ${Array.from({ length: 100 }, (_, i) => `<a href="#link${i}">Navigation ${i}</a>`).join("")}
 <div id="editor" contenteditable="true" role="textbox" aria-label="Post draft"><b>old rich</b> draft</div>
 <div id="plain" contenteditable="plaintext-only" aria-label="Plain editor">old</div>
@@ -110,10 +110,13 @@ document.querySelector('#files').addEventListener('change',async e=>{document.qu
     assert.doesNotMatch(JSON.stringify(await inspect()), /must-not-expose/);
     const semantic = await call({ action: "read", selector: "#short-selectors" });
     const scopedEditor = semantic.elements?.find(element=>element.kind==='rich-text');
-    assert.equal(scopedEditor?.selector, 'section[data-testid="stable-group"] div[role="textbox"]');
+    assert.equal(scopedEditor?.selector, '#stable-scope div[data-testid="shared-editor"]');
     assert.equal((await call({ action: "fill", selector: scopedEditor?.selector, text: "Short selector draft 👋" })).filled, true);
     assert.equal((await call({ action: "read", selector: scopedEditor?.selector })).text, "Short selector draft 👋");
-    const quotedButton = semantic.elements?.find(element=>element.tag==='button');
+    await call({ action: "click", selector: "#duplicate-group" });
+    assert.equal((await call({ action: "fill", selector: scopedEditor?.selector, text: "Stable despite a second widget" })).filled, true);
+    assert.equal((await call({ action: "read", selector: scopedEditor?.selector })).text, "Stable despite a second widget");
+    const quotedButton = semantic.elements?.find(element=>element.label==='Quoted selector fixture');
     assert.ok(quotedButton?.selector.includes('data-testid'));
     await call({ action: "click", selector: quotedButton?.selector }); // Escaping is executable CSS, not merely pretty metadata.
     assert.equal(before.nextElementOffset, 80);

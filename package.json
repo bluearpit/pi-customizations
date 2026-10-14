@@ -1,6 +1,6 @@
 {
   "name": "@bluearpit/pi-customizations",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "private": false,
   "type": "module",
   "description": "Portable Pi extensions for context, side chats, tool approvals, background workers, and local Brave automation",

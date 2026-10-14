@@ -7,34 +7,42 @@ export function controlDOM(request) {
       const matches = document.querySelectorAll(selector);
       return matches.length === 1 && matches[0] === expected;
     };
-    const candidates = (element) => {
+    const candidates = (element, mode = "all") => {
       const result = element.id && element.id.length <= 120 ? [`#${CSS.escape(element.id)}`] : [];
-      if (sensitiveControl(element)) return result;
+      if (sensitiveControl(element) || mode === "id") return result;
       // Never use field values, selected states, or label text as selectors.
-      for (const attribute of ["data-testid", "data-test", "data-qa", "name", "role"]) {
+      for (const attribute of mode === "test" ? ["data-testid", "data-test", "data-qa"] : ["data-testid", "data-test", "data-qa", "name", "role"]) {
         const value = element.getAttribute(attribute);
         if (value && value.length <= 120) result.push(`${element.tagName.toLowerCase()}[${attribute}="${CSS.escape(value)}"]`);
       }
       return result;
     };
     const local = candidates(node);
-    for (const selector of local) if (unique(selector, node)) return selector;
-    const parts = [];
-    for (let current = node; current && current !== document.body; current = current.parentElement) {
-      if (current !== node) for (const anchor of candidates(current)) {
-        if (!unique(anchor, current)) continue;
-        for (const candidate of local) {
-          const scoped = `${anchor} ${candidate}`;
+    for (const selector of local) if (selector.startsWith("#") && unique(selector, node)) return selector;
+    let fallback = "body";
+    // Prefer ancestor IDs over template test/role/name uniqueness: duplicate
+    // widgets may hydrate after a snapshot, even duplicating their test IDs.
+    for (const mode of ["id", "test", "all"]) {
+      if (mode === "all") for (const selector of local) if (unique(selector, node)) return selector;
+      const parts = [];
+      for (let current = node; current && current !== document.body; current = current.parentElement) {
+        if (current !== node) for (const anchor of candidates(current, mode)) {
+          if (!unique(anchor, current)) continue;
+          for (const candidate of local) {
+            const scoped = `${anchor} ${candidate}`;
+            if (unique(scoped, node)) return scoped;
+          }
+          const scoped = `${anchor} > ${parts.join(" > ")}`;
           if (unique(scoped, node)) return scoped;
         }
-        const scoped = `${anchor} > ${parts.join(" > ")}`;
-        if (unique(scoped, node)) return scoped;
+        const tag = current.tagName.toLowerCase();
+        const peers = Array.from(current.parentElement?.children || []).filter((child) => child.tagName === current.tagName);
+        parts.unshift(`${tag}:nth-of-type(${peers.indexOf(current) + 1})`);
       }
-      const tag = current.tagName.toLowerCase();
-      const peers = Array.from(current.parentElement?.children || []).filter((child) => child.tagName === current.tagName);
-      parts.unshift(`${tag}:nth-of-type(${peers.indexOf(current) + 1})`);
+      if (mode === "test") for (const selector of candidates(node, "test")) if (unique(selector, node)) return selector;
+      fallback = "body > " + parts.join(" > ");
     }
-    return "body > " + parts.join(" > ");
+    return fallback;
   };
   const sensitiveNode = (node) => node.matches('input[type="password" i]') || /(?:password|one-time-code|cc-)/i.test(node.getAttribute("autocomplete") || "");
   const sensitiveControl = (node) => {
