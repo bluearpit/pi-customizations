@@ -3,9 +3,33 @@
 export function controlDOM(request) {
   const selectorFor = (node) => {
     if (node === document.body) return "body";
-    if (node.id && document.querySelectorAll(`#${CSS.escape(node.id)}`).length === 1) return `#${CSS.escape(node.id)}`;
+    const unique = (selector, expected) => {
+      const matches = document.querySelectorAll(selector);
+      return matches.length === 1 && matches[0] === expected;
+    };
+    const candidates = (element) => {
+      const result = element.id && element.id.length <= 120 ? [`#${CSS.escape(element.id)}`] : [];
+      if (sensitiveControl(element)) return result;
+      // Never use field values, selected states, or label text as selectors.
+      for (const attribute of ["data-testid", "data-test", "data-qa", "name", "role"]) {
+        const value = element.getAttribute(attribute);
+        if (value && value.length <= 120) result.push(`${element.tagName.toLowerCase()}[${attribute}="${CSS.escape(value)}"]`);
+      }
+      return result;
+    };
+    const local = candidates(node);
+    for (const selector of local) if (unique(selector, node)) return selector;
     const parts = [];
     for (let current = node; current && current !== document.body; current = current.parentElement) {
+      if (current !== node) for (const anchor of candidates(current)) {
+        if (!unique(anchor, current)) continue;
+        for (const candidate of local) {
+          const scoped = `${anchor} ${candidate}`;
+          if (unique(scoped, node)) return scoped;
+        }
+        const scoped = `${anchor} > ${parts.join(" > ")}`;
+        if (unique(scoped, node)) return scoped;
+      }
       const tag = current.tagName.toLowerCase();
       const peers = Array.from(current.parentElement?.children || []).filter((child) => child.tagName === current.tagName);
       parts.unshift(`${tag}:nth-of-type(${peers.indexOf(current) + 1})`);

@@ -16,6 +16,7 @@ test("live controls: whole rich-text drafts, native/ARIA state, uploads, and nes
   let uploaded = "";
   const html = () => `<!doctype html><title>Control fixture</title><h1>Control fixture</h1>
 <p id="events">Enter 0; checkbox 0</p><p id="editor-result"></p><p id="area-result"></p><p id="select-result"></p><p id="file-result"></p><p id="controlled-result"></p><p id="parent-result">Parent unchanged</p>
+<div id="short-selectors"><section data-testid="stable-group"><div role="textbox" contenteditable="true">Scoped draft</div></section><section data-testid="other-group"><div role="textbox" contenteditable="true">Other draft</div></section><button data-testid='short "quoted" control'>Quoted selector fixture</button></div>
 ${Array.from({ length: 100 }, (_, i) => `<a href="#link${i}">Navigation ${i}</a>`).join("")}
 <div id="editor" contenteditable="true" role="textbox" aria-label="Post draft"><b>old rich</b> draft</div>
 <div id="plain" contenteditable="plaintext-only" aria-label="Plain editor">old</div>
@@ -24,6 +25,7 @@ ${Array.from({ length: 100 }, (_, i) => `<a href="#link${i}">Navigation ${i}</a>
 <input id="controlled" value="old controlled"><input id="number" type="number" value="123"><input id="email" type="email" value="old@example.com">
 <input id="inside" value="parent remains unchanged"><input id="card" autocomplete="cc-number" value="must-not-expose-card">
 <input id="readonly" readonly value="unchanged"><input id="disabled" disabled>
+<input type="password" name="must-not-expose-selector-name" value="must-not-expose-selector-value">
 <input id="password" type="password" value="must-not-expose-password"><input id="otp" autocomplete="one-time-code" value="must-not-expose-otp">
 <button id="focus-password" onclick="document.querySelector('#password').focus()">Focus password fixture</button>
 <button id="focus-card-select" onclick="document.querySelector('#sensitive-select').focus()">Focus card fixture</button>
@@ -106,6 +108,14 @@ document.querySelector('#files').addEventListener('change',async e=>{document.qu
       await assert.rejects(call({ action: "press", key }), /sensitive control/);
     }
     assert.doesNotMatch(JSON.stringify(await inspect()), /must-not-expose/);
+    const semantic = await call({ action: "read", selector: "#short-selectors" });
+    const scopedEditor = semantic.elements?.find(element=>element.kind==='rich-text');
+    assert.equal(scopedEditor?.selector, 'section[data-testid="stable-group"] div[role="textbox"]');
+    assert.equal((await call({ action: "fill", selector: scopedEditor?.selector, text: "Short selector draft 👋" })).filled, true);
+    assert.equal((await call({ action: "read", selector: scopedEditor?.selector })).text, "Short selector draft 👋");
+    const quotedButton = semantic.elements?.find(element=>element.tag==='button');
+    assert.ok(quotedButton?.selector.includes('data-testid'));
+    await call({ action: "click", selector: quotedButton?.selector }); // Escaping is executable CSS, not merely pretty metadata.
     assert.equal(before.nextElementOffset, 80);
     assert.ok((await call({ action: "read", elementOffset: 80 })).elements?.some(element=>element.tag==='a'));
     const tailOptions = await call({ action: "read", selector: "#long", optionOffset: 50 });
