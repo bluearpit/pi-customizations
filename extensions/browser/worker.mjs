@@ -1,6 +1,9 @@
 // One request per process: client/native crashes cannot kill the Pi host.
 import puppeteer from "puppeteer-core";
 import { targetIdentity, trackPopup } from "./targets.mjs";
+import { controlDOM } from "./dom.mjs";
+import { validateUploadFiles } from "./uploads.mjs";
+import { MAX_ELEMENTS, MAX_OPTIONS } from "./limits.mjs";
 
 class Failure extends Error {
   constructor(code, message) { super(message); this.code = code; }
@@ -33,14 +36,28 @@ async function ownedPage(browser, info) {
   throw new Failure("PAGE_MISSING", "This session's tab is gone or unavailable. Use open with an explicit URL to recreate it; actions are never replayed into another tab.");
 }
 
-async function uniqueElement(page, selector) {
-  await page.waitForSelector(selector, { visible: true, timeout: 7000 });
+async function uniqueElement(page, selector, allowHidden = false) {
+  await page.waitForSelector(selector, { visible: !allowHidden, timeout: 7000 });
   const matches = await page.$$(selector);
   if (matches.length !== 1) {
     await Promise.all(matches.map((element) => element.dispose()));
     throw new Failure("SELECTOR", `Selector matches ${matches.length} elements; read the page and choose a unique selector.`);
   }
   return matches[0];
+}
+
+async function scopedFrame(page, selectors = []) {
+  let frame = page.mainFrame();
+  for (const selector of selectors) {
+    const element = await uniqueElement(frame, selector);
+    try {
+      if (!await element.evaluate((node) => node.tagName === "IFRAME")) throw new Failure("INPUT", "frame selectors must identify iframe elements.");
+      const child = await element.contentFrame();
+      if (!child) throw new Failure("FRAME_MISSING", "The iframe is not available; inspect its parent again.");
+      frame = child;
+    } finally { await element.dispose(); }
+  }
+  return frame;
 }
 
 async function run(request) {
@@ -108,7 +125,7 @@ async function run(request) {
     page.setDefaultTimeout(7000);
     // Never silently accept alert/confirmation dialogs.
     page.on("dialog", (dialog) => { void dialog.dismiss().catch(() => {}); });
-    if (["open", "click", "fill", "press"].includes(request.action)) {
+    if (["open", "click", "fill", "select", "check", "upload", "press"].includes(request.action)) {
       popupGuard = await browser.target().createCDPSession();
       let active = false;
       const initial = await popupGuard.send("Target.getTargets");
@@ -133,25 +150,60 @@ async function run(request) {
       }
       return blockedPopups ? { ...result, blockedPopups } : result;
     };
+    const frame = await scopedFrame(page, request.frame);
+    const dom = (action, extra = {}) => frame.evaluate(controlDOM, { action, selector: request.selector, maxOptions: MAX_OPTIONS, ...extra });
+    let outcome = {};
     if (request.action === "open") {
       await page.goto(request.url, { waitUntil: "domcontentloaded", timeout: 15000 });
-    } else if (request.action === "click") {
-      const element = await uniqueElement(page, request.selector);
-      try { await element.click(); } finally { await element.dispose(); }
-    } else if (request.action === "fill") {
-      const element = await uniqueElement(page, request.selector);
+    } else if (["click", "fill", "select", "check", "upload"].includes(request.action)) {
+      const element = await uniqueElement(frame, request.selector, request.action === "upload");
       try {
-        const editable = await element.evaluate((node) => node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement);
-        if (!editable) throw new Failure("INPUT", "fill supports input and textarea elements only.");
-        await element.focus();
-        await element.evaluate((node) => {
-          const proto = node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-          Object.getOwnPropertyDescriptor(proto, "value").set.call(node, "");
-          node.dispatchEvent(new Event("input", { bubbles: true }));
-        });
-        if (request.text) await element.type(request.text);
+        const control = await dom("describe");
+        if (control.error || !control.actions.includes(request.action)) throw new Failure("INPUT", control.error || "This control does not support the requested action; inspect its kind, state, and actions.");
+        if (request.action === "click") await element.click();
+        else if (request.action === "fill") {
+          await page.bringToFront(); // Input.insertText requires actual tab focus, not just activeElement.
+          const prepared = await dom("prepareFill", { text: request.text });
+          if (prepared.error) throw new Failure("INPUT", prepared.error);
+          if (!request.text) await page.keyboard.press("Backspace");
+          const focused = await dom("focusMatches");
+          if (!focused.matches) throw new Failure("INPUT", "The editor lost focus or changed; inspect before typing again.");
+          // Insert the whole plaintext as one browser input operation, not Enter/key
+          // events per character. Multiline drafts must not trigger Enter-to-send.
+          if (request.text) await page.keyboard.sendCharacter(request.text);
+          const verified = await dom("verifyFill", { text: request.text });
+          if (!verified.matches) throw new Failure("INPUT", "The editor did not accept the complete text. Inspect before repeating fill.");
+          outcome = { filled: true, characters: request.text.length };
+        } else if (request.action === "select") {
+          if (!control.multiple && request.values.length !== 1) throw new Failure("INPUT", "A single-select requires exactly one option value.");
+          const valid = await element.evaluate((node, values) => values.every((value) => { const matches = Array.from(node.options).filter((option) => option.value === value); return matches.length === 1 && !matches[0].disabled && !matches[0].parentElement?.disabled; }), request.values);
+          if (!valid) throw new Failure("INPUT", "A requested option is missing or disabled; inspect the select again.");
+          await element.select(...request.values);
+          const selected = await dom("selected");
+          if (selected.values.length !== request.values.length || !request.values.every((value) => selected.values.includes(value))) throw new Failure("INPUT", "Selection was not confirmed; inspect before repeating it.");
+          outcome = { selected: selected.values };
+        } else if (request.action === "check") {
+          if (control.kind === "radio" && !request.checked && control.checked) throw new Failure("INPUT", "A radio cannot be unchecked by clicking it; choose another radio instead.");
+          const changed = control.checked !== request.checked;
+          if (changed) await element.click();
+          const verified = await dom("describe");
+          if (verified.checked !== request.checked) throw new Failure("INPUT", "Checked state was not confirmed; inspect before repeating it.");
+          outcome = { checked: verified.checked, changed };
+        } else {
+          const paths = await validateUploadFiles(request.paths);
+          if (!control.multiple && paths.length !== 1) throw new Failure("INPUT", "This file input only accepts one file.");
+          await element.uploadFile(...paths);
+          const count = await element.evaluate((node) => node.files.length);
+          if (count !== paths.length) throw new Failure("INPUT", "File attachment was not confirmed; inspect before repeating it.");
+          outcome = { attachedFiles: count }; // Attachment is not proof of server-side upload success.
+        }
       } finally { await element.dispose(); }
     } else if (request.action === "press") {
+      await page.bringToFront();
+      const focus = await dom("focusedState");
+      if (focus.sensitive) throw new Failure("INPUT", "Keyboard input into a sensitive control is refused, even without a selector.");
+      if (focus.descendant || request.frame && !focus.focused) throw new Failure("INPUT", "Focus a control in the exact requested frame before pressing a key; descendant-frame focus is not accepted.");
+      if (request.selector && !(await dom("focusMatches", { forPress: true })).matches) throw new Failure("INPUT", "The expected control is no longer focused; inspect before pressing a key.");
       if (request.key.startsWith("Shift+")) {
         await page.keyboard.down("Shift");
         try { await page.keyboard.press(request.key.slice(6)); }
@@ -167,28 +219,12 @@ async function run(request) {
       return { url: page.url(), title: await page.title(), image };
     }
     if (request.action === "read") {
-      await page.waitForFunction(() => document.readyState !== "loading", { timeout: 7000 });
-      const snapshot = await page.evaluate(({ offset, maxChars }) => {
-        const all = (document.body?.innerText || "").slice(0, 10000000);
-        const selectorFor = (node) => {
-          if (node.id && document.querySelectorAll(`#${CSS.escape(node.id)}`).length === 1) return `#${CSS.escape(node.id)}`;
-          const parts = [];
-          for (let current = node; current && current !== document.body; current = current.parentElement) {
-            const tag = current.tagName.toLowerCase();
-            const peers = Array.from(current.parentElement?.children || []).filter((child) => child.tagName === current.tagName);
-            parts.unshift(`${tag}:nth-of-type(${peers.indexOf(current) + 1})`);
-          }
-          return "body > " + parts.join(" > ");
-        };
-        const elements = Array.from(document.querySelectorAll("a,button,input,textarea,select,[role=button]")).filter((node) => node.getClientRects().length).slice(0, 80).map((node) => ({
-          selector: selectorFor(node), tag: node.tagName.toLowerCase(),
-          label: (node.getAttribute("aria-label") || node.getAttribute("placeholder") || node.innerText || node.getAttribute("type") || "").slice(0, 120),
-        }));
-        return { text: all.slice(offset, offset + maxChars), totalChars: all.length, nextOffset: offset + maxChars < all.length ? offset + maxChars : undefined, elements };
-      }, { offset: request.offset || 0, maxChars: request.maxChars || 12000 });
-      return { url: page.url(), title: await page.title(), ...snapshot };
+      await frame.waitForFunction(() => document.readyState !== "loading", { timeout: 7000 });
+      const snapshot = await frame.evaluate(controlDOM, { action: "inspect", selector: request.selector, offset: request.offset || 0, maxChars: request.maxChars || 12000, elementOffset: request.elementOffset || 0, optionOffset: request.optionOffset || 0, maxElements: MAX_ELEMENTS, maxOptions: MAX_OPTIONS });
+      if (snapshot.error) throw new Failure("SELECTOR", snapshot.error);
+      return { url: page.url(), title: await page.title(), ...(request.frame ? { frame: request.frame, frameOrigin: new URL(frame.url()).origin } : {}), ...snapshot };
     }
-    return await finish({ url: page.url(), title: await page.title(), done: true });
+    return await finish({ url: page.url(), title: await page.title(), done: true, ...outcome });
   } finally {
     await closePopups();
     await popupGuard?.detach().catch(() => {});

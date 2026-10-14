@@ -38,6 +38,20 @@ test("browser rejects nonlocal CDP, privileged navigation, and invalid inputs", 
   for (const key of ["Meta+q", "Alt+F4", "Control+l", "F12", "Meta"]) assert.throws(() => validateRequest({ action: "press", key }));
   for (const key of ["Enter", "Tab", "Shift+Tab", "ArrowDown", "a"]) validateRequest({ action: "press", key });
   validateRequest({ action: "fill", selector: "#field", text: "" });
+  validateRequest({ action: "select", selector: "#sort", values: ["newest"] });
+  validateRequest({ action: "check", selector: "#box", checked: false });
+  validateRequest({ action: "upload", selector: "#files", paths: ["/tmp/approved.txt"] });
+  validateRequest({ action: "fill", selector: "#editor", text: "whole draft", frame: ["#outer", "#inner"] });
+  for (const request of [
+    { action: "select" as const, selector: "#sort" },
+    { action: "select" as const, selector: "#sort", values: ["x", "x"] },
+    { action: "check" as const, selector: "#box" },
+    { action: "upload" as const, selector: "#file", paths: [] },
+    { action: "upload" as const, selector: "#file", paths: ["relative.txt"] },
+    { action: "read" as const, frame: [] },
+    { action: "read" as const, frame: ["#a", "#b", "#c", "#d", "#e"] },
+    { action: "close" as const, frame: ["#a"] },
+  ]) assert.throws(() => validateRequest(request));
 });
 
 test("target identity survives URL changes and popup tracking excludes existing/self/foreign tabs", () => {
@@ -107,6 +121,22 @@ else {
     assert.equal(await readFile(f.counter, "utf8"), "2");
     await assert.rejects(runBrowser({ action: "click", selector: "#submit" }, "session", f.options), /WORKER_CRASH/);
     assert.equal(await readFile(f.counter, "utf8"), "3");
+  } finally { await f.cleanup(); }
+});
+
+test("new control mutations forward their arguments and are never automatically replayed", async () => {
+  const f = await fixture(`if(request.action==='create') reply({targetId:'owned',browserId:'browser'}); else if(request.action==='open') reply({url:request.url}); else {appendFileSync(counter,JSON.stringify(request)+'\\n'); process.exit(1);}`);
+  try {
+    await runBrowser({ action: "open", url: "https://example.com" }, "session", f.options);
+    const requests = [
+      { action: "select" as const, selector: "#sort", values: ["newest"], frame: ["#frame"] },
+      { action: "check" as const, selector: "#box", checked: false },
+      { action: "upload" as const, selector: "#files", paths: ["/tmp/approved.txt"] },
+    ];
+    for (const request of requests) await assert.rejects(runBrowser(request, "session", f.options), /WORKER_CRASH/);
+    const calls = (await readFile(f.counter, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(calls.length, requests.length);
+    for (const [index, request] of requests.entries()) for (const [key, value] of Object.entries(request)) assert.deepEqual(calls[index][key], value);
   } finally { await f.cleanup(); }
 });
 

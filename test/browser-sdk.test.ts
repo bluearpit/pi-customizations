@@ -69,8 +69,18 @@ for (const mode of ["default", "auto"] as const) {
       const tool = session.agent.state.tools.find((tool) => tool.name === "brave_browser");
       assert.ok(tool, "Headless SDK sessions advertise the browser tool");
       assert.equal(tool.executionMode, "sequential", "Browser tool preserves model action order even in a parallel batch");
+      const schema = JSON.stringify(tool.parameters);
+      for (const parameter of ["select", "check", "upload", "frame", "elementOffset", "optionOffset", "contenteditable"]) assert.ok(schema.includes(parameter), `SDK advertises ${parameter}`);
       const agent = session.agent as typeof session.agent & { beforeToolCall: (call: { toolCall: { id: string; name: string }; args: object }) => Promise<{ block?: boolean; reason?: string } | undefined> };
       const verdict = await agent.beforeToolCall({ toolCall: { id: "test", name: "brave_browser" }, args: { action: "status" } });
+      for (const args of [
+        { action: "select", selector: "#sort", values: ["new"] },
+        { action: "check", selector: "#box", checked: true },
+        { action: "upload", selector: "#files", paths: ["/tmp/approved.txt"] },
+      ]) {
+        const gate = await agent.beforeToolCall({ toolCall: { id: "control", name: "brave_browser" }, args });
+        assert.equal(gate?.block === true, mode === "default", `${args.action} uses the same permission boundary`);
+      }
       if (mode === "default") {
         assert.equal(verdict?.block, true);
         assert.match(verdict?.reason || "", /Approval required/);
